@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1"
 bytemuck = { version = "1.4", features = [ "derive" ] }
 env_logger = "0.9"
+image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
 log = "0.4"
 tokio = { version = "1", features = ["full"] }
 winit = "0.27"

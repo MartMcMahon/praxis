@@ -6,6 +6,7 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+mod texture;
 // struct Player {
 //     x: i32,
 //     y: i32,
@@ -23,10 +24,14 @@ struct State {
     clear_color: wgpu::Color,
     render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
-    num_verticies: u32,
-
+    // num_verticies: u32,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
+    bind_groups: [wgpu::BindGroup; 2],
+    bind_group_index: usize,
+    diffuse_texture: texture::Texture,
+
+    new_texture: texture::Texture,
 }
 
 impl State {
@@ -36,6 +41,7 @@ impl State {
 
         let instance = wgpu::Instance::new(wgpu::Backends::all());
         let surface = unsafe { instance.create_surface(window) };
+
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
@@ -57,6 +63,29 @@ impl State {
             .await
             .unwrap();
 
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("texture_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface.get_supported_formats(&adapter)[0],
@@ -66,6 +95,45 @@ impl State {
         };
         surface.configure(&device, &config);
 
+        let diffuse_bytes = include_bytes!("../catday.png");
+        let diffuse_texture =
+            texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "catday.png").unwrap();
+        let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &texture_bind_group_layout,
+            label: Some("diffuse_bind_group"),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
+                },
+            ],
+        });
+
+        let cat_bytes = include_bytes!("../cats.png");
+        let new_texture =
+            texture::Texture::from_bytes(&device, &queue, cat_bytes, "cats high-fiving texture")
+                .unwrap();
+        let new_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &texture_bind_group_layout,
+            label: Some("user_bind_group"),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&new_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&new_texture.sampler),
+                },
+            ],
+        });
+
+        let bind_groups = [diffuse_bind_group, new_bind_group];
+
         let shader = device.create_shader_module(include_wgsl!("shader.wgsl"));
         // shortcuted
         // device.create_shader_module(wgpu::ShaderModuleDescriptor{label: Some("shader"),source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into())});
@@ -73,7 +141,7 @@ impl State {
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layoout"),
-                bind_group_layouts: &[],
+                bind_group_layouts: &[&texture_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -142,10 +210,14 @@ impl State {
             clear_color,
             render_pipeline,
             vertex_buffer,
-            num_verticies: VERTICES.len() as u32,
-
+            // num_verticies: VERTICES.len() as u32,
             index_buffer,
             num_indices,
+            // diffuse_bind_group,
+            bind_groups,
+            bind_group_index: 0,
+            diffuse_texture,
+            new_texture,
         }
     }
 
@@ -209,6 +281,7 @@ impl State {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.bind_groups[self.bind_group_index], &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..self.num_indices, 0, 0..1)
@@ -283,6 +356,18 @@ pub async fn run() {
             WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
                 state.resize(**new_inner_size);
             }
+            WindowEvent::KeyboardInput {
+                input:
+                    KeyboardInput {
+                        state: ElementState::Pressed,
+                        virtual_keycode: Some(VirtualKeyCode::Space),
+                        ..
+                    },
+                ..
+            } => {
+                println!("space hit!");
+                state.bind_group_index = (state.bind_group_index + 1) % 2;
+            }
             _ => {}
         },
         _ => {}
@@ -293,7 +378,7 @@ pub async fn run() {
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct Vertex {
     position: [f32; 3],
-    color: [f32; 3],
+    tex_coords: [f32; 2],
 }
 // does it work without these?
 // unsafe impl bytemuck::Pod for Vertex {}
@@ -311,8 +396,9 @@ impl Vertex {
             *
             ***/
 
+        use std::mem;
         wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            array_stride: mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
                 wgpu::VertexAttribute {
@@ -321,9 +407,9 @@ impl Vertex {
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    offset: mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x3,
+                    format: wgpu::VertexFormat::Float32x2,
                 },
             ],
         }
@@ -333,24 +419,24 @@ impl Vertex {
 const VERTICES: &[Vertex] = &[
     Vertex {
         position: [-0.0868241, 0.49240386, 0.0],
-        color: [0.5, 0.0, 0.5],
-    }, // A
+        tex_coords: [0.4131759, 1.0 - 0.99240386],
+    },
     Vertex {
         position: [-0.49513406, 0.06958647, 0.0],
-        color: [0.5, 0.0, 0.5],
-    }, // B
+        tex_coords: [0.0048659444, 1.0 - 0.56958647],
+    },
     Vertex {
         position: [-0.21918549, -0.44939706, 0.0],
-        color: [0.5, 0.0, 0.5],
-    }, // C
+        tex_coords: [0.28081453, 1.0 - 0.05060294],
+    },
     Vertex {
         position: [0.35966998, -0.3473291, 0.0],
-        color: [0.5, 0.0, 0.5],
-    }, // D
+        tex_coords: [0.85967, 1.0 - 0.1526709],
+    },
     Vertex {
         position: [0.44147372, 0.2347359, 0.0],
-        color: [0.5, 0.0, 0.5],
-    }, // E
+        tex_coords: [0.9414737, 1.0 - 0.7347359],
+    },
 ];
 
 const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4];
