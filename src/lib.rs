@@ -12,13 +12,29 @@ use winit::{
 use wasm_bindgen::prelude::*;
 
 mod camera;
+mod clock;
 mod model;
 mod resources;
 mod texture;
 
+use clock::ClockBuffer;
 use model::{DrawLight, DrawModel, Vertex};
 
 const NUM_INSTANCES_PER_ROW: u32 = 10;
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ClockUniform {
+    ms: f32,
+}
+impl ClockUniform {
+    fn new() -> Self {
+        Self { ms: 0.0 }
+    }
+    fn update(&mut self, delta: f32) {
+        self.ms += delta;
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -137,6 +153,7 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     render_pipeline: wgpu::RenderPipeline,
     obj_model: model::Model,
+    quad_model: model::Model,
     camera: camera::Camera,                      // UPDATED!
     projection: camera::Projection,              // NEW!
     camera_controller: camera::CameraController, // UPDATED!
@@ -154,8 +171,13 @@ struct State {
     light_render_pipeline: wgpu::RenderPipeline,
     #[allow(dead_code)]
     debug_material: model::Material,
+    blank_mat: model::Material,
     // NEW!
     mouse_pressed: bool,
+
+    clock_uniform: ClockUniform,
+    clock_buffer: wgpu::Buffer,
+    clock_bind_group: wgpu::BindGroup,
 }
 
 fn create_render_pipeline(
@@ -303,7 +325,13 @@ impl State {
                 label: Some("texture_bind_group_layout"),
             });
 
-        // UPDATED!
+        let clock_uniform = ClockUniform::new();
+        let clock_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("clock buffer"),
+            contents: bytemuck::cast_slice(&[clock_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         let camera = camera::Camera::new((0.0, 5.0, 10.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
         let projection =
             camera::Projection::new(config.width, config.height, cgmath::Deg(45.0), 0.1, 100.0);
@@ -319,7 +347,7 @@ impl State {
         });
 
         const SPACE_BETWEEN: f32 = 3.0;
-        let instances = (0..NUM_INSTANCES_PER_ROW)
+        let mut instances = (0..NUM_INSTANCES_PER_ROW)
             .flat_map(|z| {
                 (0..NUM_INSTANCES_PER_ROW).map(move |x| {
                     let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
@@ -340,6 +368,15 @@ impl State {
                 })
             })
             .collect::<Vec<_>>();
+
+        instances.push(Instance {
+            position: cgmath::Vector3 {
+                x: 1.0,
+                y: 4.0,
+                z: 1.0,
+            },
+            rotation: cgmath::Quaternion::zero(),
+        });
 
         let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
         let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -374,6 +411,11 @@ impl State {
 
         let obj_model =
             resources::load_model("cube.obj", &device, &queue, &texture_bind_group_layout)
+                .await
+                .unwrap();
+
+        let quad_model =
+            resources::load_model("quad.obj", &device, &queue, &texture_bind_group_layout)
                 .await
                 .unwrap();
 
@@ -414,6 +456,29 @@ impl State {
             label: None,
         });
 
+        let time_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("camera_bind_group_layout"),
+            });
+        let clock_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &time_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: clock_buffer.as_entire_binding(),
+            }],
+            label: Some("clock_bind_group"),
+        });
+
         let depth_texture =
             texture::Texture::create_depth_texture(&device, &config, "depth_texture");
 
@@ -424,6 +489,7 @@ impl State {
                     &texture_bind_group_layout,
                     &camera_bind_group_layout,
                     &light_bind_group_layout,
+                    &time_bind_group_layout,
                 ],
                 push_constant_ranges: &[],
             });
@@ -493,6 +559,31 @@ impl State {
             )
         };
 
+        let blank_mat = {
+            let diffuse_bytes = include_bytes!("../res/blank.png");
+            // let normal_bytes = include_bytes!("../res/blank.png");
+            let normal_bytes = &diffuse_bytes.clone();
+            let diffuse_texture = texture::Texture::from_bytes(
+                &device,
+                &queue,
+                diffuse_bytes,
+                "res/blank.png",
+                false,
+            )
+            .unwrap();
+            let normal_texture =
+                texture::Texture::from_bytes(&device, &queue, normal_bytes, "res/blank.png", true)
+                    .unwrap();
+
+            model::Material::new(
+                &device,
+                "blank-material",
+                diffuse_texture,
+                normal_texture,
+                &texture_bind_group_layout,
+            )
+        };
+
         Self {
             surface,
             device,
@@ -500,6 +591,7 @@ impl State {
             config,
             render_pipeline,
             obj_model,
+            quad_model,
             camera,
             projection,
             camera_controller,
@@ -516,8 +608,13 @@ impl State {
             light_render_pipeline,
             #[allow(dead_code)]
             debug_material,
+            blank_mat,
             // NEW!
             mouse_pressed: false,
+
+            clock_buffer,
+            clock_uniform,
+            clock_bind_group,
         }
     }
 
@@ -563,7 +660,13 @@ impl State {
     }
 
     fn update(&mut self, dt: std::time::Duration) {
-        // UPDATED!
+        self.clock_uniform.update(0.001);
+        self.queue.write_buffer(
+            &self.clock_buffer,
+            0,
+            bytemuck::cast_slice(&[self.clock_uniform]),
+        );
+
         self.camera_controller.update_camera(&mut self.camera, dt);
         self.camera_uniform
             .update_view_proj(&self.camera, &self.projection);
@@ -633,12 +736,33 @@ impl State {
             );
 
             render_pass.set_pipeline(&self.render_pipeline);
+            // render_pass.set_vertex_buffer(0, &self.obj_model.vertex_buffer.slice(..));
             render_pass.draw_model_instanced(
                 &self.obj_model,
-                0..self.instances.len() as u32,
+                0..(self.instances.len() - 1) as u32,
                 &self.camera_bind_group,
                 &self.light_bind_group,
+                &self.clock_bind_group,
             );
+            // render_pass.draw_model_instanced_with_material(
+            //     &self.quad_model,
+            //     &self.blank_mat,
+            //     (self.instances.len() - 1) as u32..self.instances.len() as u32,
+            //     &self.camera_bind_group,
+            //     &self.light_bind_group,
+            // );
+
+            // {
+            // let mesh = &self.obj_model.meshes[0];
+            // render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+            // render_pass
+            //     .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            // render_pass.set_bind_group(0, &self.obj_model.materials[0].bind_group, &[]);
+            // render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+            // render_pass.set_bind_group(2, &self.light_bind_group, &[]);
+            // render_pass.set_bind_group(3, &self.clock_bind_group, &[]);
+            // render_pass.draw_indexed(0..1, 0, 0..self.instances.len() as u32);
+            // }
         }
         self.queue.submit(iter::once(encoder.finish()));
         output.present();
