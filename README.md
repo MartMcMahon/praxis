@@ -6,6 +6,7 @@ https://sotrh.github.io/learn-wgpu/
 is pretty good
 
 
-![praxis_alpha](https://github.com/user-attachments/assets/b11728ea-1511-48e2-b3bf-1b891b90748b)
+
+![ezgif com-optimize](https://github.com/user-attachments/assets/7ca7f536-6b9e-4b48-ac54-889ca003a813)
 
 in this state, blocks were moved with WASD and SPACE added more.
